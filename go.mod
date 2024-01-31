@@ -1,4 +1,4 @@
-module www.velocidex.com/golang/regparser
+module windows-regparser
 
 go 1.18
 

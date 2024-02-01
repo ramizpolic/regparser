@@ -26,7 +26,9 @@ func main() {
 	}
 
 	// recursively list all keys
-	recursiveList(registry, "")
+	recurseListMany(registry, []string{
+		"Software/Microsoft/Windows NT/CurrentVersion",
+	})
 }
 
 func recursiveList(registry *regparser.Registry, keyName string) {
@@ -36,13 +38,21 @@ func recursiveList(registry *regparser.Registry, keyName string) {
 		return
 	}
 
+	fmt.Printf("\n ==== %s Subkeys:\n\n", keyName)
 	for _, subkey := range key.Subkeys() {
-		fmt.Printf(" [%s subkey] %s - %v\n", keyName, subkey.Name(), subkey.LastWriteTime())
+		fmt.Printf(" %s - %v\n", subkey.Name(), subkey.LastWriteTime())
 
 		recursiveList(registry, path.Join(keyName, subkey.Name()))
 	}
 
-	//for _, value := range key.Values() {
-	//	fmt.Printf(" [%s values]: %s : %#v\n", keyName, value.ValueName(), value.ValueData())
-	//}
+	fmt.Printf("\n ==== %s Values:\n\n", keyName)
+	for _, value := range key.Values() {
+		fmt.Printf(" %s : %#v\n", value.ValueName(), value.ValueData())
+	}
+}
+
+func recurseListMany(registry *regparser.Registry, keys []string) {
+	for _, key := range keys {
+		recursiveList(registry, key)
+	}
 }

@@ -30,80 +30,59 @@ func newReader(path string) (*Registry, error) {
 }
 
 func (r *Registry) GetPlatform() (map[string]string, error) {
-	keyData, err := r.getKeyValues("Microsoft/Windows NT/CurrentVersion")
+	data, err := r.getKeyValues("Microsoft/Windows NT/CurrentVersion")
 	if err != nil {
 		return nil, err
 	}
 
-	osData := map[string]string{
-		"type":    "operating-system",
-		"os_type": "windows",
-	}
-	for key, value := range keyData {
-		switch key {
-		case "DigitalProductId", "DigitalProductId4":
-			continue
-		default:
-			osData[key] = value
-		}
-	}
+	// remove secrets
+	delete(data, "DigitalProductId")
+	delete(data, "DigitalProductId4")
 
-	return osData, nil
+	// inject identifiers
+	data["Type"] = "Operating System"
+	data["OsType"] = "Windows"
+
+	return data, nil
 }
 
 func (r *Registry) GetUpdates() (map[string]string, error) {
-	keyData := r.registry.OpenKey("Microsoft/Windows/CurrentVersion/Component Based Servicing/Packages")
-	if keyData == nil {
+	pkgRegistry := r.registry.OpenKey("Microsoft/Windows/CurrentVersion/Component Based Servicing/Packages")
+	if pkgRegistry == nil {
 		return nil, fmt.Errorf("key not found")
 	}
 
-	// to remove:
-	// update_install_clients := map[string]struct{}{"WindowsUpdateAgent": {}, "UpdateAgentLCU": {}}
 	updateKeys := map[string]*regparser.CM_KEY_NODE{}
-	for _, subKey := range keyData.Subkeys() {
-		for _, subKeyVal := range subKey.Values() {
-			if subKeyVal.Name().Value == "InstallClient" {
-				updateKeys[subKey.Name()] = subKey
+	for _, pkgKey := range pkgRegistry.Subkeys() {
+		for _, key := range pkgKey.Values() {
+			switch value := key.ValueName(); value {
+			case "InstallClient", "UpdateAgentLCU":
+				updateKeys[pkgKey.Name()] = pkgKey
 			}
 		}
 	}
 
-	installedKbs := make(map[string]string)
-	for _, subKey := range updateKeys {
-		for _, val := range subKey.Values() {
-			kb := ""
+	updates := make(map[string]string)
+	kbRegex := regexp.MustCompile("KB[0-9]{7,}")
+	for _, updateKey := range updateKeys {
+		for _, key := range updateKey.Values() {
+			keyName := key.ValueName()
+			keyValue := toString(key.ValueData())
 
-			if val.Name().Value == "InstallLocation" {
-				re, err := regexp.Compile("KB[0-9]{7,}")
-				if err != nil {
-					continue
-				}
-
-				match := re.FindString(val.ValueData().String)
-				if match != "" {
-					kb = match
+			if keyName == "InstallLocation" {
+				if kb := kbRegex.FindString(keyValue); kb != "" {
+					updates[kb] = kb
 				}
 			}
-
-			if val.Name().Value == "CurrentState" && val.ValueData().String == "112" {
-				re, err := regexp.Compile("KB[0-9]{7,}")
-				if err != nil {
-					continue
+			if keyName == "CurrentState" && keyValue == "112" {
+				if kb := kbRegex.FindString(updateKey.Name()); kb != "" {
+					updates[kb] = "CURRSTATE" + kb
 				}
-
-				match := re.FindString(subKey.Name())
-				if match != "" {
-					kb = match
-				}
-			}
-
-			if kb != "" {
-				installedKbs[kb] = kb
 			}
 		}
 	}
 
-	return installedKbs, nil
+	return updates, nil
 }
 
 func (r *Registry) GetAll() map[string]interface{} {

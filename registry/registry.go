@@ -1,8 +1,11 @@
 package registry
 
+// TODO(ramizpolic): This is MVP for feature parity, this can and will be heavily improved
+
 import (
 	"fmt"
 	"os"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -10,7 +13,8 @@ import (
 )
 
 type Registry struct {
-	registry *regparser.Registry
+	registryPath string
+	registry     *regparser.Registry
 }
 
 func newReader(path string) (*Registry, error) {
@@ -25,7 +29,8 @@ func newReader(path string) (*Registry, error) {
 	}
 
 	return &Registry{
-		registry: registry,
+		registryPath: path,
+		registry:     registry,
 	}, nil
 }
 
@@ -54,8 +59,8 @@ func (r *Registry) GetUpdates() (map[string]string, error) {
 
 	updateKeys := map[string]*regparser.CM_KEY_NODE{}
 	for _, pkgKey := range pkgRegistry.Subkeys() {
-		for _, key := range pkgKey.Values() {
-			switch value := key.ValueName(); value {
+		for _, prop := range pkgKey.Values() {
+			switch propName := prop.ValueName(); propName {
 			case "InstallClient", "UpdateAgentLCU":
 				updateKeys[pkgKey.Name()] = pkgKey
 			}
@@ -65,16 +70,16 @@ func (r *Registry) GetUpdates() (map[string]string, error) {
 	updates := make(map[string]string)
 	kbRegex := regexp.MustCompile("KB[0-9]{7,}")
 	for _, updateKey := range updateKeys {
-		for _, key := range updateKey.Values() {
-			keyName := key.ValueName()
-			keyValue := toString(key.ValueData())
+		for _, prop := range updateKey.Values() {
+			propName := prop.ValueName()
+			propValue := toString(prop.ValueData())
 
-			if keyName == "InstallLocation" {
-				if kb := kbRegex.FindString(keyValue); kb != "" {
+			if propName == "InstallLocation" {
+				if kb := kbRegex.FindString(propValue); kb != "" {
 					updates[kb] = kb
 				}
 			}
-			if keyName == "CurrentState" && keyValue == "112" {
+			if propName == "CurrentState" && propValue == "112" {
 				if kb := kbRegex.FindString(updateKey.Name()); kb != "" {
 					updates[kb] = "CURRSTATE" + kb
 				}
@@ -85,12 +90,135 @@ func (r *Registry) GetUpdates() (map[string]string, error) {
 	return updates, nil
 }
 
+func (r *Registry) GetUserProfiles() (map[string]string, error) {
+	profileReg := r.registry.OpenKey("Microsoft/Windows NT/CurrentVersion/ProfileList")
+	if profileReg == nil {
+		return nil, fmt.Errorf("key not found")
+	}
+
+	profiles := make(map[string]string)
+	for _, profileKey := range profileReg.Subkeys() {
+		for _, prop := range profileKey.Values() {
+			propName := prop.ValueName()
+			if propName != "ProfileImagePath" { // only interested in this key
+				continue
+			}
+
+			propValue := toString(prop.ValueData())
+			propValue = strings.ReplaceAll(propValue, "\\", "/")
+			if idx := strings.Index(propValue, "/Users/"); idx >= 0 {
+				propValue = path.Join(r.getMountPath(), propValue[idx:])
+				profiles[propValue] = propValue
+			}
+		}
+	}
+
+	return profiles, nil
+}
+
+// TODO: simplify the key insertions
+
+func (r *Registry) GetUserApps() ([]map[string]string, error) {
+	profiles, err := r.GetUserProfiles()
+	if err != nil {
+		return nil, err
+	}
+
+	apps := []map[string]string{}
+	for profile := range profiles {
+		profileRegPath := path.Join(profile, "NTUSER.DAT")
+
+		profileFile, err := os.Open(profileRegPath)
+		if err != nil {
+			// check and log error
+			continue
+		}
+
+		profileReg, err := regparser.NewRegistry(profileFile)
+		if err != nil {
+			// check and log error
+			continue
+		}
+
+		appReg := profileReg.OpenKey("SOFTWARE/Microsoft/Windows/CurrentVersion/Uninstall")
+		if appReg == nil {
+			// reg key does not exist, log
+			continue
+		}
+
+		for _, appKey := range appReg.Subkeys() {
+			currApp := make(map[string]string)
+			for _, prop := range appKey.Values() {
+				propName := prop.ValueName()
+				propValue := toString(prop.ValueData())
+
+				switch propName {
+				case "DisplayName", "DisplayVersion", "VersionMajor", "VersionMinor":
+					currApp[propName] = propValue
+				}
+			}
+
+			// add to output
+			// TODO: clean this up
+			if _, ok := currApp["DisplayName"]; ok {
+				apps = append(apps, currApp)
+			}
+		}
+	}
+
+	return apps, nil
+}
+
+func (r *Registry) GetSystemApps() ([]map[string]string, error) {
+	apps := []map[string]string{}
+	for _, regKey := range []string{
+		"Microsoft/Windows/CurrentVersion/Uninstall",
+		"Wow6432Node/Microsoft/Windows/CurrentVersion/Uninstall",
+		"WOW6432Node/Microsoft/Windows/CurrentVersion/Uninstall",
+	} {
+		appReg := r.registry.OpenKey(regKey)
+		if appReg == nil {
+			// reg key does not exist, log
+			continue
+		}
+
+		for _, appKey := range appReg.Subkeys() {
+			currApp := make(map[string]string)
+			for _, prop := range appKey.Values() {
+				propName := prop.ValueName()
+				propValue := toString(prop.ValueData())
+
+				switch propName {
+				case "DisplayName", "DisplayVersion", "VersionMajor", "VersionMinor":
+					currApp[propName] = propValue
+				}
+			}
+
+			// add to output
+			// TODO: clean this up
+			if _, ok := currApp["DisplayName"]; ok {
+				apps = append(apps, currApp)
+			}
+		}
+	}
+
+	return apps, nil
+}
+
 func (r *Registry) GetAll() map[string]interface{} {
 	osData, _ := r.GetPlatform()
 	updateData, _ := r.GetUpdates()
+	profileData, _ := r.GetUserProfiles()
+	userApps, _ := r.GetUserApps()
+	systemApps, _ := r.GetSystemApps()
 	return map[string]interface{}{
-		"platform": osData,
-		"kbs":      updateData,
+		"platform":        osData,
+		"kbs":             updateData,
+		"users":           profileData,
+		"userApps":        userApps,
+		"totalUserApps":   len(userApps),
+		"systemApps":      systemApps,
+		"totalSystemApps": len(systemApps),
 	}
 }
 
@@ -106,6 +234,15 @@ func (r *Registry) getKeyValues(keyPath string) (map[string]string, error) {
 	}
 
 	return data, nil
+}
+
+func (r *Registry) getMountPath() string {
+	// mountPath + /Windows/System32/config/SOFTWARE
+	// the mount path is everything before system path, i.e. /Windows/System32/
+	if idx := strings.Index(r.registryPath, "/Windows/System32/"); idx >= 0 {
+		return r.registryPath[:idx]
+	}
+	return "/"
 }
 
 func toString(data *regparser.ValueData) string {
@@ -135,5 +272,22 @@ func toString(data *regparser.ValueData) string {
 
 	default:
 		return ""
+	}
+}
+
+func (r *Registry) listKeysFromPath(keyPath string) {
+	key := r.registry.OpenKey(keyPath)
+	if key == nil {
+		return
+	}
+
+	for _, subkey := range key.Subkeys() {
+		fmt.Printf("%-120s\n", path.Join(keyPath, subkey.Name()))
+	}
+
+	// print all keys under this path
+	for _, value := range key.Values() {
+		// THIS CAN BE UNICODE/UTF-16 VALUE!!!
+		fmt.Printf("%-120s : %#v\n", path.Join(keyPath, value.ValueName()), value.ValueData().String)
 	}
 }
